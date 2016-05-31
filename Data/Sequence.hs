@@ -1765,6 +1765,11 @@ adjustDigit f i (Four a b c d)
 
 -- | /O(log(min(i,n-i)))/. @'insertAt' i x xs@ inserts @x@ into @xs@
 -- at the index @i@, shifting the rest of the sequence over.
+--
+-- @
+-- insertAt 2 x [a,b,c,d] = [a,b,x,c,d]
+-- insertAt 4 x [a,b,c,d] = insertAt 10 x [a,b,c,d] = [a,b,c,d,x]
+-- @
 -- 
 -- prop> insertAt i x xs = take i xs >< singleton x >< drop i xs
 --
@@ -1789,12 +1794,12 @@ insTree f i (Single x) = case f i x of
 insTree f i (Deep s pr m sf)
   | i < spr     = case insLeftDigit f i pr of
      InsLeftDig pr' -> Deep (s + 1) pr' m sf
-     InsDigNode pr' n -> Deep (s + 1) pr' (n `consTree` m) sf
+     InsDigNode pr' n -> m `seq` Deep (s + 1) pr' (n `consTree` m) sf
   | i < spm     = let !m' = insTree (insNode f) (i - spr) m
                   in Deep (s + 1) pr m' sf
   | otherwise   = case insRightDigit f (i - spm) sf of
      InsRightDig sf' -> Deep (s + 1) pr m sf'
-     InsNodeDig n sf' -> Deep (s + 1) pr (m `snocTree` n) sf'
+     InsNodeDig n sf' -> m `seq` Deep (s + 1) pr (m `snocTree` n) sf'
   where
     spr     = size pr
     spm     = spr + size m
@@ -1828,6 +1833,11 @@ insNode f i (Node3 s a b c)
 -- | /O(log(min(i,n-i)))/. Delete the element of a sequence at a given
 -- index. Return the original sequence if the index is out of range.
 --
+-- @
+-- deleteAt 2 [a,b,c,d] = [a,b,d]
+-- deleteAt 4 [a,b,c,d] = deleteAt (-1) [a,b,c,d] = [a,b,c,d]
+-- @
+--
 -- @since 0.5.8
 deleteAt :: Int -> Seq a -> Seq a
 deleteAt i (Seq xs)
@@ -1841,7 +1851,7 @@ delTreeE i (Deep s pr m sf)
   | i < spr = delLeftDigitE i pr m sf
   | i < spm = case delTree delNodeE (i - spr) m of
      FullTree m' -> Deep (s - 1) pr m' sf
-     DefectTree e -> delRebuildMiddle  (s - 1) pr e sf
+     DefectTree e -> delRebuildMiddle (s - 1) pr e sf
   | otherwise = delRightDigitE (i - spm) pr m sf
   where spr = size pr
         spm = spr + size m
@@ -1897,100 +1907,117 @@ delTree f i (Deep s pr m sf)
   | i < spr = case delDigit f i pr of
      FullDig pr' -> FullTree $ Deep (s - 1) pr' m sf
      DefectDig e -> case viewLTree m of
-                      EmptyLTree -> FullTree $ delRebuildRightDigit e sf
-                      ConsLTree n m' -> FullTree $ delRebuildLeftSide e n m' sf
+                      EmptyLTree -> FullTree $ delRebuildRightDigit (s - 1) e sf
+                      ConsLTree n m' -> FullTree $ delRebuildLeftSide (s - 1) e n m' sf
   | i < spm = case delTree (delNode f) (i - spr) m of
      FullTree m' -> FullTree (Deep (s - 1) pr m' sf)
      DefectTree e -> FullTree $ delRebuildMiddle (s - 1) pr e sf
   | otherwise = case delDigit f (i - spm) sf of
      FullDig sf' -> FullTree $ Deep (s - 1) pr m sf'
      DefectDig e -> case viewRTree m of
-                      EmptyRTree -> FullTree $ delRebuildLeftDigit pr e
-                      SnocRTree m' n -> FullTree $ delRebuildRightSide pr m' n e
+                      EmptyRTree -> FullTree $ delRebuildLeftDigit (s - 1) pr e
+                      SnocRTree m' n -> FullTree $ delRebuildRightSide (s - 1) pr m' n e
   where spr = size pr
         spm = spr + size m
 
 data Del a = Full !(Node a) | Defect a
--- TODO: strictify node construction and use arithmetic for sizes
+
 delNode :: Sized a => (Int -> Node a -> Del a) -> Int -> Node (Node a) -> Del (Node a)
 delNode f i (Node3 s a b c)
   | i < sa = case f i a of
      Full a' -> Full $ Node3 (s - 1) a' b c
-     Defect e -> case b of
-       Node3 _ x y z -> Full $ Node3 (s - 1) (node2 e x) (node2 y z) c
-       Node2 _ x y -> Full $ Node2 (s - 1) (node3 e x y) c
+     Defect e -> let !se = size e in case b of
+       Node3 sxyz x y z -> Full $ Node3 (s - 1) (Node2 (se + sx) e x) (Node2 (sxyz - sx) y z) c
+         where !sx = size x
+       Node2 sxy x y -> Full $ Node2 (s - 1) (Node3 (sxy + se) e x y) c
   | i < sab = case f (i - sa) b of
      Full b' -> Full $ Node3 (s - 1) a b' c
-     Defect e -> case a of
-       Node3 _ x y z -> Full $ Node3 (s - 1) (node2 x y) (node2 z e) c
-       Node2 _ x y -> Full $ Node2 (s - 1) (node3 x y e) c
+     Defect e -> let !se = size e in case a of
+       Node3 sxyz x y z -> Full $ Node3 (s - 1) (Node2 (sxyz - sz) x y) (Node2 (sz + se) z e) c
+         where !sz = size z
+       Node2 sxy x y -> Full $ Node2 (s - 1) (Node3 (sxy + se) x y e) c
   | otherwise = case f (i - sab) c of
      Full c' -> Full $ Node3 (s - 1) a b c'
-     Defect e -> case b of
-       Node3 _ x y z -> Full $ Node3 (s - 1) a (node2 x y) (node2 z e)
-       Node2 _ x y -> Full $ Node2 (s - 1) a (node3 x y e)
+     Defect e -> let !se = size e in case b of
+       Node3 sxyz x y z -> Full $ Node3 (s - 1) a (Node2 (sxyz - sz) x y) (Node2 (sz + se) z e)
+         where !sz = size z
+       Node2 sxy x y -> Full $ Node2 (s - 1) a (Node3 (sxy + se) x y e)
   where sa = size a
         sab = sa + size b
 delNode f i (Node2 s a b)
   | i < sa = case f i a of
      Full a' -> Full $ Node2 (s - 1) a' b
-     Defect e -> case b of
-       Node3 _ x y z -> Full $ Node2 (s - 1) (node2 e x) (node2 y z)
+     Defect e -> let !se = size e in case b of
+       Node3 sxyz x y z -> Full $ Node2 (s - 1) (Node2 (se + sx) e x) (Node2 (sxyz - sx) y z)
+        where !sx = size x
        Node2 _ x y -> Defect $ Node3 (s - 1) e x y
   | otherwise = case f (i - sa) b of
      Full b' -> Full $ Node2 (s - 1) a b'
-     Defect e -> case a of
-       Node3 _ x y z -> Full $ Node2 (s - 1) (node2 x y) (node2 z e)
+     Defect e -> let !se = size e in case a of
+       Node3 sxyz x y z -> Full $ Node2 (s - 1) (Node2 (sxyz - sz) x y) (Node2 (sz + se) z e)
+         where !sz = size z
        Node2 _ x y -> Defect $ Node3 (s - 1) x y e
   where sa = size a
 
-delRebuildRightDigit :: Sized a => a -> Digit (Node a) -> FingerTree (Node a)
-delRebuildRightDigit p (One a) = case a of
-  Node3 _ x y z -> deep (One (node2 p x)) EmptyT (One (node2 y z))
-  Node2 _ x y -> Single (node3 p x y)
-delRebuildRightDigit p (Two a b) = case a of
-  Node3 _ x y z -> deep (Two (node2 p x) (node2 y z)) EmptyT (One b)
-  Node2 _ x y -> deep (One (node3 p x y)) EmptyT (One b)
-delRebuildRightDigit p (Three a b c) = case a of
-  Node3 _ x y z -> deep (Two (node2 p x) (node2 y z)) EmptyT (Two b c)
-  Node2 _ x y -> deep (Two (node3 p x y) b) EmptyT (One c)
-delRebuildRightDigit p (Four a b c d) = case a of
-  Node3 _ x y z -> deep (Three (node2 p x) (node2 y z) b) EmptyT (Two c d)
-  Node2 _ x y -> deep (Two (node3 p x y) b) EmptyT (Two c d)
+delRebuildRightDigit :: Sized a => Int -> a -> Digit (Node a) -> FingerTree (Node a)
+delRebuildRightDigit s p (One a) = let !sp = size p in case a of
+  Node3 sxyz x y z -> Deep s (One (Node2 (sp + sx) p x)) EmptyT (One (Node2 (sxyz - sx) y z))
+    where !sx = size x
+  Node2 sxy x y -> Single (Node3 (sp + sxy) p x y)
+delRebuildRightDigit s p (Two a b) = let !sp = size p in case a of
+  Node3 sxyz x y z -> Deep s (Two (Node2 (sp + sx) p x) (Node2 (sxyz - sx) y z)) EmptyT (One b)
+    where !sx = size x
+  Node2 sxy x y -> Deep s (One (Node3 (sp + sxy) p x y)) EmptyT (One b)
+delRebuildRightDigit s p (Three a b c) = let !sp = size p in case a of
+  Node3 sxyz x y z -> Deep s (Two (Node2 (sp + sx) p x) (Node2 (sxyz - sx) y z)) EmptyT (Two b c)
+    where !sx = size x
+  Node2 sxy x y -> Deep s (Two (Node3 (sp + sxy) p x y) b) EmptyT (One c)
+delRebuildRightDigit s p (Four a b c d) = let !sp = size p in case a of
+  Node3 sxyz x y z -> Deep s (Three (Node2 (sp + sx) p x) (Node2 (sxyz - sx) y z) b) EmptyT (Two c d)
+    where !sx = size x
+  Node2 sxy x y -> Deep s (Two (Node3 (sp + sxy) p x y) b) EmptyT (Two c d)
 
-delRebuildLeftDigit :: Sized a => Digit (Node a) -> a -> FingerTree (Node a)
-delRebuildLeftDigit (One a) p = case a of
-  Node3 _ x y z -> deep (One (node2 x y)) EmptyT (One (node2 z p))
-  Node2 _ x y -> Single (node3 x y p)
-delRebuildLeftDigit (Two a b) p = case b of
-  Node3 _ x y z -> deep (Two a (node2 x y)) EmptyT (One (node2 z p))
-  Node2 _ x y -> deep (One a) EmptyT (One (node3 x y p))
-delRebuildLeftDigit (Three a b c) p = case c of
-  Node3 _ x y z -> deep (Two a b) EmptyT (Two (node2 x y) (node2 z p))
-  Node2 _ x y -> deep (Two a b) EmptyT (One (node3 x y p))
-delRebuildLeftDigit (Four a b c d) p = case d of
-  Node3 _ x y z -> deep (Three a b c) EmptyT (Two (node2 x y) (node2 z p))
-  Node2 _ x y -> deep (Two a b) EmptyT (Two c (node3 x y p))
+delRebuildLeftDigit :: Sized a => Int -> Digit (Node a) -> a -> FingerTree (Node a)
+delRebuildLeftDigit s (One a) p = let !sp = size p in case a of
+  Node3 sxyz x y z -> Deep s (One (Node2 (sxyz - sz) x y)) EmptyT (One (Node2 (sz + sp) z p))
+    where !sz = size z
+  Node2 sxy x y -> Single (Node3 (sxy + sp) x y p)
+delRebuildLeftDigit s (Two a b) p = let !sp = size p in case b of
+  Node3 sxyz x y z -> Deep s (Two a (Node2 (sxyz - sz) x y)) EmptyT (One (Node2 (sz + sp) z p))
+    where !sz = size z
+  Node2 sxy x y -> Deep s (One a) EmptyT (One (Node3 (sxy + sp) x y p))
+delRebuildLeftDigit s (Three a b c) p = let !sp = size p in case c of
+  Node3 sxyz x y z -> Deep s (Two a b) EmptyT (Two (Node2 (sxyz - sz) x y) (Node2 (sz + sp) z p))
+    where !sz = size z
+  Node2 sxy x y -> Deep s (Two a b) EmptyT (One (Node3 (sxy + sp) x y p))
+delRebuildLeftDigit s (Four a b c d) p = let !sp = size p in case d of
+  Node3 sxyz x y z -> Deep s (Three a b c) EmptyT (Two (Node2 (sxyz - sz) x y) (Node2 (sz + sp) z p))
+    where !sz = size z
+  Node2 sxy x y -> Deep s (Two a b) EmptyT (Two c (Node3 (sxy + sp) x y p))
 
 delRebuildLeftSide :: Sized a
-                   => a -> Node (Node a) -> FingerTree (Node (Node a)) -> Digit (Node a)
+                   => Int -> a -> Node (Node a) -> FingerTree (Node (Node a)) -> Digit (Node a)
                    -> FingerTree (Node a)
-delRebuildLeftSide p (Node2 _ a b) m sf = case a of
-  Node2 _ x y -> deep (Two (node3 p x y) b) m sf
-  Node3 _ x y z -> deep (Three (node2 p x) (node2 y z) b) m sf
-delRebuildLeftSide p (Node3 _ a b c) m sf = case a of
-  Node2 _ x y -> deep (Three (node3 p x y) b c) m sf
-  Node3 _ x y z -> deep (Four (node2 p x) (node2 y z) b c) m sf
+delRebuildLeftSide s p (Node2 _ a b) m sf = let !sp = size p in case a of
+  Node2 sxy x y -> Deep s (Two (Node3 (sp + sxy) p x y) b) m sf
+  Node3 sxyz x y z -> Deep s (Three (Node2 (sp + sx) p x) (Node2 (sxyz - sx) y z) b) m sf
+    where !sx = size x
+delRebuildLeftSide s p (Node3 _ a b c) m sf = let !sp = size p in case a of
+  Node2 sxy x y -> Deep s (Three (Node3 (sp + sxy) p x y) b c) m sf
+  Node3 sxyz x y z -> Deep s (Four (Node2 (sp + sx) p x) (Node2 (sxyz - sx) y z) b c) m sf
+    where !sx = size x
 
 delRebuildRightSide :: Sized a
-                    => Digit (Node a) -> FingerTree (Node (Node a)) -> Node (Node a) -> a
+                    => Int -> Digit (Node a) -> FingerTree (Node (Node a)) -> Node (Node a) -> a
                     -> FingerTree (Node a)
-delRebuildRightSide pr m (Node2 _ a b) p = case b of
-  Node2 _ x y -> deep pr m (Two a (node3 x y p))
-  Node3 _ x y z -> deep pr m (Three a (node2 x y) (node2 z p))
-delRebuildRightSide pr m (Node3 _ a b c) p = case c of
-  Node2 _ x y -> deep pr m (Three a b (node3 x y p))
-  Node3 _ x y z -> deep pr m (Four a b (node2 x y) (node2 z p))
+delRebuildRightSide s pr m (Node2 _ a b) p = let !sp = size p in case b of
+  Node2 sxy x y -> Deep s pr m (Two a (Node3 (sxy + sp) x y p))
+  Node3 sxyz x y z -> Deep s pr m (Three a (Node2 (sxyz - sz) x y) (Node2 (sz + sp) z p))
+    where !sz = size z
+delRebuildRightSide s pr m (Node3 _ a b c) p = let !sp = size p in case c of
+  Node2 sxy x y -> Deep s pr m (Three a b (Node3 (sxy + sp) x y p))
+  Node3 sxyz x y z -> Deep s pr m (Four a b (Node2 (sxyz - sz) x y) (Node2 (sz + sp) z p))
+    where !sz = size z
 
 delRebuildMiddle :: Sized a
                  => Int -> Digit a -> a -> Digit a
@@ -2000,7 +2027,6 @@ delRebuildMiddle s (Two a b) e sf = Deep s (Three a b e) EmptyT sf
 delRebuildMiddle s (Three a b c) e sf = Deep s (Four a b c e) EmptyT sf
 delRebuildMiddle s (Four a b c d) e sf = Deep s (Two a b) (Single (node3 c d e)) sf
 
-
 data DelDig a = FullDig !(Digit (Node a)) | DefectDig a
 delDigit :: Sized a => (Int -> Node a -> Del a) -> Int -> Digit (Node a) -> DelDig a
 delDigit f !i (One a) = case f i a of
@@ -2009,54 +2035,63 @@ delDigit f !i (One a) = case f i a of
 delDigit f i (Two a b)
   | i < sa = case f i a of
      Full a' -> FullDig $ Two a' b
-     Defect e -> case b of
-       Node3 _ x y z -> FullDig $ Two (node2 e x) (node2 y z)
-       Node2 _ x y -> FullDig $ One (node3 e x y)
+     Defect e -> let !se = size e in case b of
+       Node3 sxyz x y z -> FullDig $ Two (Node2 (se + sx) e x) (Node2 (sxyz - sx) y z)
+         where !sx = size x
+       Node2 sxy x y -> FullDig $ One (Node3 (se + sxy) e x y)
   | otherwise = case f (i - sa) b of
      Full b' -> FullDig $ Two a b'
-     Defect e -> case a of
-       Node3 _ x y z -> FullDig $ Two (node2 x y) (node2 z e)
-       Node2 _ x y -> FullDig $ One (node3 x y e)
+     Defect e -> let !se = size e in case a of
+       Node3 sxyz x y z -> FullDig $ Two (Node2 (sxyz - sz) x y) (Node2 (sz + se) z e)
+         where !sz = size z
+       Node2 sxy x y -> FullDig $ One (Node3 (sxy + se) x y e)
   where sa = size a
 delDigit f i (Three a b c)
   | i < sa = case f i a of
      Full a' -> FullDig $ Three a' b c
-     Defect e -> case b of
-       Node3 _ x y z -> FullDig $ Three (node2 e x) (node2 y z) c
-       Node2 _ x y -> FullDig $ Two (node3 e x y) c
+     Defect e -> let !se = size e in case b of
+       Node3 sxyz x y z -> FullDig $ Three (Node2 (se + sx) e x) (Node2 (sxyz - sx) y z) c
+         where !sx = size x
+       Node2 sxy x y -> FullDig $ Two (Node3 (se + sxy) e x y) c
   | i < sab = case f (i - sa) b of
      Full b' -> FullDig $ Three a b' c
-     Defect e -> case a of
-       Node3 _ x y z -> FullDig $ Three (node2 x y) (node2 z e) c
-       Node2 _ x y -> FullDig $ Two (node3 x y e) c
+     Defect e -> let !se = size e in case a of
+       Node3 sxyz x y z -> FullDig $ Three (Node2 (sxyz - sz) x y) (Node2 (sz + se) z e) c
+         where !sz = size z
+       Node2 sxy x y -> FullDig $ Two (Node3 (sxy + se) x y e) c
   | otherwise = case f (i - sab) c of
      Full c' -> FullDig $ Three a b c'
-     Defect e -> case b of
-       Node3 _ x y z -> FullDig $ Three a (node2 x y) (node2 z e)
-       Node2 _ x y -> FullDig $ Two a (node3 x y e)
+     Defect e -> let !se = size e in case b of
+       Node3 sxyz x y z -> FullDig $ Three a (Node2 (sxyz - sz) x y) (Node2 (sz + se) z e)
+         where !sz = size z
+       Node2 sxy x y -> FullDig $ Two a (Node3 (sxy + se) x y e)
   where sa = size a
         sab = sa + size b
 delDigit f i (Four a b c d)
   | i < sa = case f i a of
      Full a' -> FullDig $ Four a' b c d
-     Defect e -> case b of
-       Node3 _ x y z -> FullDig $ Four (node2 e x) (node2 y z) c d
-       Node2 _ x y -> FullDig $ Three (node3 e x y) c d
+     Defect e -> let !se = size e in case b of
+       Node3 sxyz x y z -> FullDig $ Four (Node2 (se + sx) e x) (Node2 (sxyz - sx) y z) c d
+         where !sx = size x
+       Node2 sxy x y -> FullDig $ Three (Node3 (se + sxy) e x y) c d
   | i < sab = case f (i - sa) b of
      Full b' -> FullDig $ Four a b' c d
-     Defect e -> case a of
-       Node3 _ x y z -> FullDig $ Four (node2 x y) (node2 z e) c d
-       Node2 _ x y -> FullDig $ Three (node3 x y e) c d
+     Defect e -> let !se = size e in case a of
+       Node3 sxyz x y z -> FullDig $ Four (Node2 (sxyz - sz) x y) (Node2 (sz + se) z e) c d
+         where !sz = size z
+       Node2 sxy x y -> FullDig $ Three (Node3 (sxy + se) x y e) c d
   | i < sabc = case f (i - sab) c of
      Full c' -> FullDig $ Four a b c' d
-     Defect e -> case b of
-       Node3 _ x y z -> FullDig $ Four a (node2 x y) (node2 z e) d
-       Node2 _ x y -> FullDig $ Three a (node3 x y e) d
+     Defect e -> let !se = size e in case b of
+       Node3 sxyz x y z -> FullDig $ Four a (Node2 (sxyz - sz) x y) (Node2 (sz + se) z e) d
+         where !sz = size z
+       Node2 sxy x y -> FullDig $ Three a (Node3 (sxy + se) x y e) d
   | otherwise = case f (i - sabc) d of
      Full d' -> FullDig $ Four a b c d'
-     Defect e -> case c of
-       Node3 _ x y z -> FullDig $ Four a b (node2 x y) (node2 z e)
-       Node2 _ x y -> FullDig $ Three a b (node3 x y e)
+     Defect e -> let !se = size e in case c of
+       Node3 sxyz x y z -> FullDig $ Four a b (Node2 (sxyz - sz) x y) (Node2 (sz + se) z e)
+         where !sz = size z
+       Node2 sxy x y -> FullDig $ Three a b (Node3 (sxy + se) x y e)
   where sa = size a
         sab = sa + size b
         sabc = sab + size c
